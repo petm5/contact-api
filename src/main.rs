@@ -6,203 +6,100 @@ use std::{
     io::{prelude::*, BufReader, Lines},
     net::{TcpListener, TcpStream},
 };
-use std::collections::HashMap;
 
-type KeyValuePair = HashMap<String, String>;
+mod http;
+mod formdata;
+
+#[derive(Debug)]
+pub struct MessageInfo {
+    name: String,
+    email: String,
+    subject: String,
+    message: String
+}
 
 fn main() {
-    let username = env::var("USER");
-    let password = env::var("PASSWORD");
-    let site = env::var("SITE");
-    let recipient = env::var("SENDTO");
+
+    let username = env::var("USER").unwrap();
+    let password = env::var("PASSWORD").unwrap();
+    let recipient = env::var("SENDTO").unwrap();
+    let site = env::var("SITE").unwrap();
+    let final_url = env::var("FINALURL").unwrap();
+
+    let creds = Credentials::new(username.to_owned(), password.to_owned());
+
+    let mailer = SmtpTransport::relay("smtp.gmail.com")
+        .unwrap()
+        .credentials(creds)
+        .build();
 
     let listener = TcpListener::bind("0.0.0.0:7878").unwrap();
+
+    let mut mail_stack: Vec<MessageInfo> = vec![];
 
     for stream in listener.incoming() {
         let stream = stream.unwrap();
 
-        handle_connection(stream);
+        handle_connection(stream, &mut mail_stack, &final_url);
+
+        while mail_stack.len() > 0 {
+            let message = mail_stack.pop().unwrap();
+            send_email(&site, &recipient, &mailer, &message);
+        }
     }
 
-    // let email = Message::builder()
-    //     .from(format!("{} <{}>", site, username).parse().unwrap())
-    //     .to(format!("<{}>", recipient).parse().unwrap())
-    //     .subject(subject)
-    //     .header(ContentType::TEXT_PLAIN)
-    //     .body(body)
-    //     .unwrap();
-
-    // let creds = Credentials::new(username.to_owned(), password.to_owned());
-
-    // let mailer = SmtpTransport::relay("smtp.gmail.com")
-    //     .unwrap()
-    //     .credentials(creds)
-    //     .build();
-
-    // match mailer.send(&email) {
-    //     Ok(_) => println!("Email sent successfully!"),
-    //     Err(e) => panic!("Could not send email: {e:?}"),
-    // }
 }
 
-fn handle_http_request_line<T>(reader: &mut BufReader<T>) -> Option<(String, String)> where T: std::io::Read {
-    let mut request_line = String::new();
+fn send_email(site: &str, recipient: &str, mailer: &SmtpTransport, message: &MessageInfo) -> Option<()> {
+
+    let email = Message::builder()
+        .from(format!("{site} <noreply@{site}>").parse().unwrap())
+        .to(format!("<{recipient}>").parse().unwrap())
+        .subject(message.subject.clone())
+        .header(ContentType::TEXT_PLAIN)
+        .body(format!("From: {} <{}>\r\n\r\n{}", message.name, message.email, message.message))
+        .unwrap();
+
+    match mailer.send(&email) {
+        Ok(_) => (),
+        Err(e) => println!("Could not send email: {e:?}"),
+    }
+
+    Some(())
     
-    let _ = reader.read_line(&mut request_line).unwrap();
-
-    let mut request_line_parts = request_line.split_whitespace();
-
-    let method = request_line_parts.next()?;
-    let path = request_line_parts.next()?;
-
-    Some((method.to_string(), path.to_string()))
 }
 
-fn handle_http_headers<T>(reader: &mut BufReader<T>) -> Option<(String, Option<String>)> where T: std::io::Read {
-    let mut content_type: Option<String> = None;
-    let mut referer: Option<String> = None;
-
-    let headers = reader
-        .lines()
-        .map(|result| result.unwrap())
-        .take_while(|line| !line.is_empty());
-
-    for line in headers {
-        let mut parts = line.split(':');
-        let key = parts.next()?;
-        let value = parts.next()?.trim().to_string();
-        match key.to_lowercase().as_str() {
-            "content-type" => content_type = Some(value),
-            "referer" => referer = Some(value),
-            &_ => ()
-        }
-    }
-
-    Some((content_type?, referer))
-}
-
-fn get_multipart_boundary(content_type: &String) -> Option<String> {
-
-    let mut params = content_type.split(';');
-
-    if params.next()? != "multipart/form-data" {
-        return None
-    }
-
-    let mut boundary: Option<String> = None;
-
-    for param in params {
-        let mut parts = param.split('=');
-        let key = parts.next()?.trim();
-        let value = parts.next()?.trim().to_string();
-        match key.to_lowercase().as_str() {
-            "boundary" => boundary = Some(value),
-            &_ => ()
-        }
-    }
-
-    return boundary
-}
-
-fn parse_content_disposition(value: &String) -> Option<String> {
-    let mut cdisp = value.split(';');
-    if cdisp.next()? != "form-data" {
-        return None
-    }
-
-    let mut name: Option<String> = None;
-
-    while let Some(param) = cdisp.next() {
-        let mut parts = param.split("=");
-        let key = parts.next()?.trim();
-        let value = parts.next()?.trim_matches(|c| c == '\"').to_string();
-        match key.to_lowercase().as_str() {
-            "name" => name = Some(value),
-            &_ => ()
-        }
-    }
-
-    return name
-}
-
-fn handle_multipart<T>(reader: &mut BufReader<T>, boundary: &String) -> Option<(String, String, String, String)> where T: std::io::Read {
-
-    let (mut name, mut email, mut subject, mut message): (Option<String>, Option<String>, Option<String>, Option<String>) = (None, None, None, None);
-
-    if !reader.lines().next()?.unwrap().ends_with(boundary) {
-        return None
-    }
-
-    'outer: loop {
-        let mut headers = reader.lines()
-            .map(|result| result.unwrap())
-            .take_while(|line| !line.is_empty());
-        let mut fname: Option<String> = None;
-        for header in headers {
-            let mut parts = header.split(':');
-            let key = parts.next()?;
-            let value = parts.next()?.trim();
-            match key.to_lowercase().as_str() {
-                "content-disposition" => {
-                    fname = parse_content_disposition(&value.to_owned());
-                },
-                &_ => ()
-            }
-        }
-        let fname = fname?;
-        let mut data = String::new();
-        for line in reader.lines().map(|result| result.unwrap()) {
-            if line.starts_with(format!("--{boundary}").as_str()) {
-                let data = data.trim().to_owned();
-                match fname.as_str() {
-                    "name" => name = Some(data),
-                    "email" => email = Some(data),
-                    "subject" => subject = Some(data),
-                    "message" => message = Some(data),
-                    &_ => ()
-                }
-                if line.ends_with("--") {
-                    break 'outer
-                }
-                break
-            }
-            data.push_str(format!("{line}\n").as_str());
-        }
-    }
-
-    Some((name?, email?, subject?, message?))
-}
-
-fn handle_http_submission(stream: &TcpStream) -> Option<String> {
+fn handle_http_submission(stream: &TcpStream, mail_stack: &mut Vec<MessageInfo>) -> Result<(), &'static str> {
 
     let mut reader = BufReader::new(stream);
 
-    let (method, path) = handle_http_request_line(&mut reader)?;
+    let (method, path) = http::read_request(&mut reader).ok_or("400 Bad Request")?;
 
-    if path != "/" {
-        return Some("404 Not Found".to_string())
+    match (method.as_str(), path.as_str()) {
+        ("POST", "/") => {
+            let headers = http::read_headers(&mut reader).ok_or("400 Bad Request\r\nStage: headers")?;
+            let formdata = formdata::read_multipart(&mut reader, headers.get("content-type").ok_or("400 Bad Request\r\nStage: content-type")?).ok_or("400 Bad Request\r\nStage: multipart")?;
+            let message = MessageInfo {
+                name: formdata.get("name").ok_or("400 Bad Request\r\nStage: name")?.clone(),
+                email: formdata.get("email").ok_or("400 Bad Request\r\nStage: email")?.clone(),
+                subject: formdata.get("subject").ok_or("400 Bad Request\r\nStage: subject")?.clone(),
+                message: formdata.get("message").ok_or("400 Bad Request\r\nStage: message")?.clone()
+            };
+            mail_stack.push(message);
+            Ok(())
+        },
+        _ => Err("404 Not Found")
     }
 
-    if method != "POST" {
-        return Some("405 Method Not Allowed".to_string())
-    }
-
-    let (content_type, referer) = handle_http_headers(&mut reader)?;
-
-    let multipart_boundary = get_multipart_boundary(&content_type)?;
-
-    let (name, email, subject, message) = handle_multipart(&mut reader, &multipart_boundary)?;
-
-    Some(if let Some(referer) = referer {
-        format!("302 Found\r\nLocation: {referer}").to_string()
-    } else {
-        "200 OK".to_string()
-    })
 }
 
-fn handle_connection(mut stream: TcpStream) {
+fn handle_connection(mut stream: TcpStream, mut mail_stack: &mut Vec<MessageInfo>, final_url: &String) {
 
-    let status_code = handle_http_submission(&mut stream).unwrap_or("400 Bad Request".to_string());
+    let status_code = if let Err(status_code) = handle_http_submission(&mut stream, &mut mail_stack) {
+        status_code.to_string()
+    } else {
+        format!("302 Found\r\nLocation: {final_url}").to_string()
+    };
 
     let response = format!("HTTP/1.1 {status_code}\r\n\r\n");
 
