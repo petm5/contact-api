@@ -1,0 +1,7 @@
+[package]
+name = "contact-api"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+lettre = { version = "0.11.7", features = ["rustls-tls", "rustls-native-certs", "builder", "hostname", "pool", "smtp-transport"], default-features = false }
