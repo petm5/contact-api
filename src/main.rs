@@ -1,8 +1,11 @@
 use std::{
     env,
+    thread,
     io::{prelude::*, BufReader, Lines},
     net::{TcpListener, TcpStream},
-    sync::{Arc, Mutex, mpsc},
+    sync::{Arc, Mutex, mpsc, atomic::{AtomicBool, Ordering}},
+    error::Error,
+    time::Duration,
 };
 
 mod http;
@@ -15,7 +18,13 @@ use lettre::message::header::ContentType;
 use lettre::transport::smtp::authentication::Credentials;
 use lettre::{Message, SmtpTransport, Transport};
 
-fn main() {
+use signal_hook::{consts::{SIGINT, SIGQUIT, SIGTERM}, iterator::Signals};
+
+use std::os::unix::net::UnixStream;
+
+const LISTEN_ADDR: &str = "0.0.0.0:8080";
+
+fn main() -> Result<(), Box<dyn Error>> {
 
     let relay = env::var("SMTP_RELAY").unwrap();
     let username = env::var("USER").unwrap();
@@ -34,14 +43,32 @@ fn main() {
 
     let mailer = Arc::new(Mailer { transport, recipient, site });
 
-    let listener = TcpListener::bind("127.0.0.1:8080").unwrap();
+    let pool = ThreadPool::new(16);
+
+    let stop_flag: Arc<AtomicBool> = Arc::new(AtomicBool::new(false));
+    let stop_me = stop_flag.clone();
+
+    let mut signals = Signals::new([SIGINT, SIGQUIT, SIGTERM]).unwrap();
+
+    thread::spawn(move || {
+        signals.wait();
+
+        println!("Shutting down...");
+        stop_flag.store(true, Ordering::Relaxed);
+        let _ = TcpStream::connect(LISTEN_ADDR);
+    });
+
+    let listener = TcpListener::bind(LISTEN_ADDR).unwrap();
 
     println!("Listening...");
 
-    let pool = ThreadPool::new(4);
-
     for stream in listener.incoming() {
+        if stop_me.load(Ordering::Relaxed) {
+            break
+        }
         let stream = stream.unwrap();
+        stream.set_write_timeout(Some(Duration::from_secs(5))).unwrap();
+        stream.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
         let final_url = final_url.clone();
         let error_url = error_url.clone();
         let mailer = mailer.clone();
@@ -50,6 +77,8 @@ fn main() {
             handle_connection(id, stream, final_url, error_url, mailer);
         });
     }
+
+    Ok(())
 
 }
 

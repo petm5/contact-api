@@ -4,8 +4,8 @@ type KeyValue = HashMap<String, String>;
 
 pub fn read_request<T>(reader: &mut BufReader<T>) -> Option<(String, String)> where T: std::io::Read {
     let mut request_line = String::new();
-    
-    let _ = reader.read_line(&mut request_line).unwrap();
+
+    let _ = reader.read_line(&mut request_line).ok()?;
 
     let mut request_line_parts = request_line.split_whitespace();
 
