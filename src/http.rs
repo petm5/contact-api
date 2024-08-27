@@ -11,6 +11,11 @@ pub fn read_request<T>(reader: &mut BufReader<T>) -> Option<(String, String)> wh
 
     let method = request_line_parts.next()?;
     let path = request_line_parts.next()?;
+    let protocol = request_line_parts.next()?;
+
+    if !protocol.starts_with("HTTP/") {
+        return None
+    }
 
     Some((method.to_string(), path.to_string()))
 }
