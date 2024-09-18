@@ -2,7 +2,7 @@ use std::io::{BufReader, BufRead};
 use std::collections::HashMap;
 type KeyValue = HashMap<String, String>;
 
-fn get_multipart_boundary(content_type: &String) -> Option<String> {
+pub fn get_multipart_boundary(content_type: &String) -> Option<String> {
 
     let mut params = content_type.split(';');
 
@@ -48,7 +48,7 @@ fn parse_content_disposition(value: &String) -> Option<String> {
 
 pub fn read_multipart<T>(reader: &mut BufReader<T>, boundary: &String) -> Option<KeyValue> where T: std::io::Read {
 
-    let boundary = &get_multipart_boundary(boundary)?;
+    // let boundary = &get_multipart_boundary(boundary)?;
 
     if !reader.lines().next()?.unwrap().ends_with(boundary) {
         return None
@@ -57,11 +57,12 @@ pub fn read_multipart<T>(reader: &mut BufReader<T>, boundary: &String) -> Option
     let mut parts = HashMap::new();
 
     'outer: loop {
-        let mut headers = reader.lines()
-            .map(|result| result.unwrap())
-            .take_while(|line| !line.is_empty());
         let mut fname: Option<String> = None;
-        for header in headers {
+        for header in reader.lines() {
+            let header = header.ok()?;
+            if header.is_empty() {
+                break
+            }
             let mut parts = header.split(':');
             let key = parts.next()?;
             let value = parts.next()?.trim();

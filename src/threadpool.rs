@@ -6,7 +6,7 @@ pub struct ThreadPool {
     sender: Option<mpsc::Sender<Job>>,
 }
 
-type Job = Box<dyn FnOnce(usize) + Send + 'static>;
+type Job = Box<dyn FnOnce() + Send + 'static>;
 
 impl ThreadPool {
     pub fn new(size: usize) -> ThreadPool {
@@ -18,8 +18,8 @@ impl ThreadPool {
 
         let mut workers = Vec::with_capacity(size);
 
-        for id in 0..size {
-            workers.push(Worker::new(id, Arc::clone(&receiver)))
+        for _ in 0..size {
+            workers.push(Worker::new(Arc::clone(&receiver)))
         }
 
         ThreadPool {
@@ -29,7 +29,7 @@ impl ThreadPool {
     }
     pub fn execute<F>(&self, f: F)
     where
-        F: FnOnce(usize) + Send + 'static,
+        F: FnOnce() + Send + 'static,
     {
         let job = Box::new(f);
 
@@ -50,23 +50,21 @@ impl Drop for ThreadPool {
 }
 
 struct Worker {
-    id: usize,
     thread: Option<thread::JoinHandle<()>>,
 }
 
 impl Worker {
-    fn new(id: usize, receiver: Arc<Mutex<mpsc::Receiver<Job>>>) -> Worker {
+    fn new(receiver: Arc<Mutex<mpsc::Receiver<Job>>>) -> Worker {
         let thread = thread::spawn(move || loop {
             let message = receiver.lock().unwrap().recv();
 
             match message {
-                Ok(job) => job(id),
+                Ok(job) => job(),
                 Err(_) => break,
             }
         });
 
         Worker {
-            id,
             thread: Some(thread)
         }
     }
