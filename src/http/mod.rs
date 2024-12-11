@@ -1,3 +1,3 @@
-pub mod primitives;
-pub mod server;
 pub mod formdata;
+pub mod req;
+pub mod resp;

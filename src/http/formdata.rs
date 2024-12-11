@@ -1,8 +1,7 @@
-use std::io::{BufReader, BufRead};
+use tokio::io::{AsyncBufRead, AsyncBufReadExt};
 use std::collections::HashMap;
-type KeyValue = HashMap<String, String>;
 
-pub fn get_multipart_boundary(content_type: &String) -> Option<String> {
+pub fn parse_content_type_boundary(content_type: &str) -> Option<String> {
 
     let mut params = content_type.split(';');
 
@@ -25,7 +24,7 @@ pub fn get_multipart_boundary(content_type: &String) -> Option<String> {
     return boundary
 }
 
-fn parse_content_disposition(value: &String) -> Option<String> {
+fn parse_content_disposition(value: &str) -> Option<String> {
     let mut cdisp = value.split(';');
     if cdisp.next()? != "form-data" {
         return None
@@ -46,49 +45,62 @@ fn parse_content_disposition(value: &String) -> Option<String> {
     return name
 }
 
-pub fn read_multipart<T>(reader: &mut BufReader<T>, boundary: &String) -> Option<KeyValue> where T: std::io::Read {
+pub async fn parse_multipart(mut stream: impl AsyncBufRead + Unpin, boundary: &String) -> anyhow::Result<HashMap<String, String>> {
+    let mut line_buffer = String::new();
+    stream.read_line(&mut line_buffer).await?;
 
-    // let boundary = &get_multipart_boundary(boundary)?;
-
-    if !reader.lines().next()?.unwrap().ends_with(boundary) {
-        return None
+    if !line_buffer.trim().ends_with(boundary) {
+        return Err(anyhow::anyhow!("cannot find multipart boundary"))
     }
 
     let mut parts = HashMap::new();
 
     'outer: loop {
-        let mut fname: Option<String> = None;
-        for header in reader.lines() {
-            let header = header.ok()?;
-            if header.is_empty() {
-                break
+        let content_disposition = loop {
+            line_buffer.clear();
+            stream.read_line(&mut line_buffer).await?;
+
+            if line_buffer.is_empty() || line_buffer == "\n" || line_buffer == "\r\n" {
+                break None;
             }
-            let mut parts = header.split(':');
-            let key = parts.next()?;
-            let value = parts.next()?.trim();
-            match key.to_lowercase().as_str() {
-                "content-disposition" => {
-                    fname = parse_content_disposition(&value.to_owned());
-                },
-                &_ => ()
+            
+            let mut comps = line_buffer.split(":");
+            let key = comps.next().ok_or(anyhow::anyhow!("missing multipart header name"))?;
+            let value = comps
+                .next()
+                .ok_or(anyhow::anyhow!("missing multipart header value"))?
+                .trim();
+
+            if key.to_lowercase().as_str() == "content-disposition" {
+                break Some(value);
             }
-        }
-        let fname = fname?;
+        };
+
+        let content_disposition = content_disposition
+            .ok_or(anyhow::anyhow!("missing multipart content disposition"))?;
+
+        let part_name = parse_content_disposition(content_disposition)
+            .ok_or(anyhow::anyhow!("missing multipart part name"))?;
+
         let mut data = String::new();
+
         loop {
-            let mut line = String::new();
-            let _ = reader.read_line(&mut line);
-            if line.starts_with(format!("--{boundary}").as_str()) {
-                let data = data.trim().to_owned();
-                parts.insert(fname, data);
-                if line.trim().ends_with("--") {
+            line_buffer.clear();
+            stream.read_line(&mut line_buffer).await?;
+
+            if line_buffer.starts_with(format!("--{boundary}").as_str()) {
+                parts.insert(part_name, data.trim().to_owned());
+
+                if line_buffer.trim().ends_with("--") {
                     break 'outer
                 }
+
                 break
             }
-            data.push_str(&line.as_str());
+
+            data.push_str(&line_buffer.as_str());
         }
     }
 
-    Some(parts)
+    Ok(parts)
 }

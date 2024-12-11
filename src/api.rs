@@ -1,75 +1,113 @@
+use std::{
+    env,
+    collections::HashMap,
+};
+use tokio::io::AsyncBufRead;
+use tokio::sync::Mutex;
 use std::sync::Arc;
-use std::env;
-use std::collections::HashMap;
-use std::sync::Mutex;
+use tracing::error;
 
-use crate::http::primitives::{HttpRequest, HttpResponse, HttpStatus, HttpMethod, HttpPayload};
-use crate::mail::Mailer;
+use crate::http;
 
-pub struct Config {
-    pub final_url: String,
-    pub error_url: String,
-    pub mailer: Mutex<Mailer>,
+use crate::mail;
+
+#[derive(Debug)]
+struct Message {
+    name: String,
+    email: String,
+    subject: String,
+    message: String,
 }
 
-impl Config {
-    pub fn from_env() -> Self {
+#[derive(Clone)]
+pub struct Api {
+    success_url: String,
+    mailer: Arc<Mutex<mail::Mailer>>
+}
+
+impl TryFrom<HashMap<String, String>> for Message {
+    type Error = anyhow::Error;
+
+    fn try_from(payload: HashMap<String, String>) -> Result<Self, Self::Error> {
+        Ok(Self {
+            name: payload.get("name")
+                .ok_or(anyhow::anyhow!("missing field: name"))?
+                .to_owned(),
+            email: payload.get("email")
+                .ok_or(anyhow::anyhow!("missing field: email"))?
+                .to_owned(),
+            subject: payload.get("subject")
+                .ok_or(anyhow::anyhow!("missing field: subject"))?
+                .to_owned(),
+            message: payload.get("message")
+                .ok_or(anyhow::anyhow!("missing field: message"))?
+                .to_owned(),
+        })
+    }
+}
+
+impl Api {
+    pub fn init() -> Self {
         let relay = env::var("SMTP_RELAY").unwrap();
         let username = env::var("USER").unwrap();
         let password = env::var("PASSWORD").unwrap();
         let recipient = env::var("SENDTO").unwrap();
-        let site = env::var("DOMAIN").unwrap();
-        let final_url = env::var("SUCCESS_URL").unwrap();
-        let error_url = env::var("ERROR_URL").unwrap();
+        let domain = env::var("DOMAIN").unwrap();
 
-        let mailer = Mutex::new(Mailer::new(username, password, relay, recipient, site));
+        let mailer = mail::Mailer::init(username, password, relay, recipient, domain);
 
         Self {
-            final_url,
-            error_url,
-            mailer
+            success_url: env::var("SUCCESS_URL").unwrap(),
+            mailer: Arc::new(Mutex::new(mailer))
         }
     }
-}
 
-fn api_handler(config: Arc<Config>, formdata: HashMap<String, String>) -> Option<()> {
-
-    let name = formdata.get("name")?.clone();
-    let email = formdata.get("email")?.clone();
-    let subject = formdata.get("subject")?.clone();
-    let message = formdata.get("message")?.clone();
-
-    let body = format!("From: {} <{}>\r\n\r\n{}", name, email, message);
-
-    let mail_result = config.mailer.lock().unwrap().send(subject, body);
-
-    if let Err(error) = mail_result {
-        println!("Mail error: {error}");
-    }
-
-    Some(())
-
-}
-
-pub fn http_handler(config: Arc<Config>, request: HttpRequest) -> HttpResponse {
-    match (request.method, request.path.as_str(), request.payload) {
-        (HttpMethod::Post, "/submit", Some(HttpPayload::KeyValue(formdata))) => {
-            let result = api_handler(config.clone(), formdata);
-            if result.is_some() {
-                HttpResponse {
-                    status: HttpStatus::Found,
-                    headers: vec![format!("Location: {}", config.final_url)]
-                }
-            } else {
-                HttpResponse {
-                    status: HttpStatus::Found,
-                    headers: vec![format!("Location: {}", config.error_url)]
+    pub async fn route_http(&mut self, request: http::req::Request) -> http::resp::Response<impl AsyncBufRead + Unpin> {
+        match request.method {
+            http::req::Method::Post => {
+                if let Some(payload) = request.payload {
+                    match request.path.as_str() {
+                        "/send" => {
+                            return match TryInto::try_into(payload) {
+                                Ok(message) => match self.send_mail(message).await {
+                                    Ok(_) => http::resp::Response::redirect(&self.success_url),
+                                    Err(e) => {
+                                        error!(?e, "send mail error");
+                                        http::resp::Response::from_html(
+                                            http::resp::Status::ServerError,
+                                            format!("{}", e)
+                                        )
+                                    }
+                                }
+                                Err(e) => http::resp::Response::from_html(
+                                    http::resp::Status::BadRequest,
+                                    format!("{}", e)
+                                )
+                            }
+                        }
+                        _ => ()
+                    }
+                } else {
+                    return http::resp::Response::from_html(
+                        http::resp::Status::BadRequest,
+                        "missing payload"
+                    )
                 }
             }
-        },
-        _ => HttpResponse {
-            status: HttpStatus::NotFound,
-            headers: vec![]
+            _ => ()
         }
+
+        http::resp::Response::from_html(
+            http::resp::Status::NotFound,
+            "not found",
+        )
+    }
+
+    async fn send_mail(&mut self, message: Message) -> anyhow::Result<()> {
+
+        let body = format!("From: {} <{}>\r\n\r\n{}", message.name, message.email, message.message);
+
+        self.mailer.lock().await.send(message.subject, body)
+
     }
 }

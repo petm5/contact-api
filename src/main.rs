@@ -1,64 +1,48 @@
-use std::{
-    thread,
-    net::{TcpListener, TcpStream},
-    sync::{Arc, atomic::{AtomicBool, Ordering}},
-    error::Error,
-    time::Duration,
-};
+use tokio::{io::BufStream, net::TcpListener};
+use tracing::info;
 
-mod threadpool;
 mod http;
 mod mail;
+
 mod api;
 
-use threadpool::ThreadPool;
-use api::Config;
+static DEFAULT_PORT: &str = "8080";
 
-use signal_hook::{consts::{SIGINT, SIGQUIT, SIGTERM}, iterator::Signals};
+#[tokio::main]
+async fn main() -> anyhow::Result<()> {
 
-const LISTEN_ADDR: &str = "0.0.0.0:8080";
+    tracing_subscriber::fmt::init();
 
-fn main() -> Result<(), Box<dyn Error>> {
+    let port: u16 = std::env::args()
+        .nth(1)
+        .unwrap_or_else(|| DEFAULT_PORT.to_string())
+        .parse()?;
 
-    let config = Arc::new(Config::from_env());
+    let api = api::Api::init();
 
-    let pool = ThreadPool::new(16);
+    let listener = TcpListener::bind(format!("0.0.0.0:{port}")).await.unwrap();
 
-    let stop_flag: Arc<AtomicBool> = Arc::new(AtomicBool::new(false));
-    let stop_me = stop_flag.clone();
+    info!("listening on: {}", listener.local_addr()?);
 
-    let mut signals = Signals::new([SIGINT, SIGQUIT, SIGTERM]).unwrap();
+    loop {
+        let (stream, addr) = listener.accept().await?;
+        let mut stream = BufStream::new(stream);
+        let mut api = api.clone();
 
-    thread::spawn(move || {
-        signals.wait();
+        tokio::spawn(async move {
+            match http::req::parse_request(&mut stream).await {
+                Ok(req) => {
+                    info!(?addr, ?req, "incoming request");
 
-        stop_flag.store(true, Ordering::Relaxed);
-        let _ = TcpStream::connect(LISTEN_ADDR);
-    });
+                    let resp = api.route_http(req).await;
 
-    let listener = TcpListener::bind(LISTEN_ADDR).unwrap();
-
-    for stream in listener.incoming() {
-        if stop_me.load(Ordering::Relaxed) {
-            break
-        }
-        let mut stream = stream.unwrap();
-        stream.set_write_timeout(Some(Duration::from_secs(5))).unwrap();
-        stream.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
-
-        let config = config.clone();
-
-        pool.execute(move || {
-            if let Some(request) = http::server::read_request(&mut stream) {
-                let response = api::http_handler(config, request);
-                let result = http::server::respond(&mut stream, response);
-                if !result.is_ok() {
-                    println!("HTTP respond failed");
+                    resp.write(&mut stream).await.unwrap();
+                },
+                Err(e) => {
+                    info!(?e, "failed to parse request");
                 }
             }
         });
     }
-
-    Ok(())
 
 } 

@@ -9,7 +9,7 @@ pub struct Mailer {
 }
 
 impl Mailer {
-    pub fn new(username: String, password: String, relay: String, recipient: String, domain: String) -> Self {
+    pub fn init(username: String, password: String, relay: String, recipient: String, domain: String) -> Self {
 
         let creds = Credentials::new(username, password);
 
@@ -21,7 +21,7 @@ impl Mailer {
         Self { transport, recipient, domain }
 
     }
-    pub fn send(&self, subject: String, body: String) -> Result<(), String> {
+    pub fn send(&self, subject: String, body: String) -> Result<(), anyhow::Error> {
 
         let email = Message::builder()
             .from(format!("{} <noreply@{}>", self.domain, self.domain).parse().unwrap())
@@ -30,8 +30,8 @@ impl Mailer {
             .header(ContentType::TEXT_PLAIN)
             .body(body)
             .unwrap();
-        
-        self.transport.send(&email).map(|_| Ok(())).or_else(|e| Err(format!("{e:?}")))?
+
+        self.transport.send(&email).map(|_| Ok(())).or_else(|e| Err(anyhow::Error::msg(format!("{e:?}"))))?
         
     }
 }
